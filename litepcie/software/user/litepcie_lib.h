@@ -11,14 +11,16 @@
 #include <stdarg.h>
 #include <pthread.h>
 
+#include "config.h"
+
 #define LITEPCIE_FILENAME "/dev/litepcie0"
 
 typedef struct {
     int litepcie_fd;
     struct litepcie_ioctl_mmap_info mmap_info;
-    uint8_t *dma_tx_buf;
+    uint8_t *dma_tx_buf[PCIE_DMA_BUFFER_COUNT];
     int dma_tx_buf_size;
-    uint8_t *dma_rx_buf;
+    uint8_t *dma_rx_buf[PCIE_DMA_BUFFER_COUNT];
     int dma_rx_buf_size;
     uint8_t *reg_buf;
 

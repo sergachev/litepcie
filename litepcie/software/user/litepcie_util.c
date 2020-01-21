@@ -129,15 +129,14 @@ void dma_test(LitePCIeState *s, int buf_size, int buf_count, BOOL is_loopback)
                 tx_underflows++;
             }
 
-            write_pn_data((uint32_t *)(s->dma_tx_buf +
-                                       tx_buf_num * s->dma_tx_buf_size),
+            write_pn_data((uint32_t *)(s->dma_tx_buf[buf_num_cur]),
                           s->tx_buf_size >> 2, &tx_seed);
 
             if (buf_rx_count >= 4*buf_count/10) {
                 const uint32_t *rx_buf;
                 int rx_buf_len;
 
-                rx_buf = (uint32_t *)(s->dma_rx_buf + buf_num_cur * s->dma_rx_buf_size);
+                rx_buf = (uint32_t *)(s->dma_rx_buf[buf_num_cur]);
                 rx_buf_len = s->rx_buf_size >> 2;
 
                 if (first_rx_buf) {

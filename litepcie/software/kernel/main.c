@@ -47,6 +47,11 @@
 #define IRQ_MASK_PCIE_DMA_READER (1 << PCIE_DMA_READER_INTERRUPT)
 #define IRQ_MASK_PCIE_DMA_WRITER (1 << PCIE_DMA_WRITER_INTERRUPT)
 
+struct litepcie_buf {
+	u8 *kva; // kernel virtual address
+	dma_addr_t hwa; // address for dma hardware
+};
+
 typedef struct {
     int minor;
     struct pci_dev *dev;
@@ -55,10 +60,8 @@ typedef struct {
     phys_addr_t bar0_phys_addr;
     uint8_t *bar0_addr; /* virtual address of BAR0 */
 
-    uint8_t *dma_tx_bufs[PCIE_DMA_BUFFER_COUNT];
-    unsigned long dma_tx_bufs_addr[PCIE_DMA_BUFFER_COUNT];
-    uint8_t *dma_rx_bufs[PCIE_DMA_BUFFER_COUNT];
-    unsigned long dma_rx_bufs_addr[PCIE_DMA_BUFFER_COUNT];
+    struct litepcie_buf dma_tx_bufs[PCIE_DMA_BUFFER_COUNT];
+    struct litepcie_buf dma_rx_bufs[PCIE_DMA_BUFFER_COUNT];
     uint8_t tx_dma_started;
     uint8_t rx_dma_started;
     wait_queue_head_t dma_waitqueue;
@@ -67,6 +70,7 @@ typedef struct {
 static dev_t litepcie_cdev;
 static LitePCIeState *litepcie_minor_table[LITEPCIE_MINOR_COUNT];
 static struct class *litepcie_class;
+//static struct dma_pool *dma_pool;
 
 static void litepcie_end(struct pci_dev *dev, LitePCIeState *s);
 static int litepcie_dma_stop(LitePCIeState *s);
@@ -112,40 +116,34 @@ static int litepcie_open(struct inode *inode, struct file *file)
 static int litepcie_mmap(struct file *file, struct vm_area_struct *vma)
 {
     LitePCIeState *s = file->private_data;
-    unsigned long pfn;
-    int is_tx, i;
+    unsigned long off = vma->vm_pgoff << PAGE_SHIFT;
+    unsigned int buf_n = (off / DMA_BUFFER_SIZE) % PCIE_DMA_BUFFER_COUNT;
+    int ret;
 
-    if (vma->vm_pgoff == 0) {
-        if (vma->vm_end - vma->vm_start != DMA_BUFFER_MAP_SIZE)
+    vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+    if (off < DMA_BUFFER_MAP_SIZE) { // TX
+        if (vma->vm_end - vma->vm_start != DMA_BUFFER_SIZE)
             return -EINVAL;
-        is_tx = 1;
-        goto remap_ram;
-    } else if (vma->vm_pgoff == (DMA_BUFFER_MAP_SIZE >> PAGE_SHIFT)) {
-        if (vma->vm_end - vma->vm_start != DMA_BUFFER_MAP_SIZE)
+        ret = remap_pfn_range(vma, vma->vm_start, PFN_DOWN(virt_to_phys(s->dma_tx_bufs[buf_n].kva)),
+                              DMA_BUFFER_SIZE, vma->vm_page_prot);
+//        ret = dma_mmap_coherent(&s->dev->dev, vma, s->dma_tx_bufs[buf_n].kva, s->dma_tx_bufs[buf_n].hwa,
+//                DMA_BUFFER_SIZE);
+        if (ret)
+            return ret;
+    } else if (off < 2 * DMA_BUFFER_MAP_SIZE) { // RX
+        if (vma->vm_end - vma->vm_start != DMA_BUFFER_SIZE)
             return -EINVAL;
-        is_tx = 0;
-    remap_ram:
-        for(i = 0; i < PCIE_DMA_BUFFER_COUNT; i++) {
-            if (is_tx)
-                pfn = __pa(s->dma_tx_bufs[i]) >> PAGE_SHIFT;
-            else
-                pfn = __pa(s->dma_rx_bufs[i]) >> PAGE_SHIFT;
-            /* Note: the memory is cached, so the user must explicitly
-               flush the CPU caches on architectures which require it. */
-            if (remap_pfn_range(vma, vma->vm_start + i * DMA_BUFFER_SIZE, pfn,
-                                DMA_BUFFER_SIZE, vma->vm_page_prot)) {
-                pr_err("remap_pfn_range failed\n");
-                return -EAGAIN;
-            }
-        }
-    } else if (vma->vm_pgoff == ((2 * DMA_BUFFER_MAP_SIZE) >> PAGE_SHIFT)) {
+        ret = remap_pfn_range(vma, vma->vm_start, PFN_DOWN(virt_to_phys(s->dma_rx_bufs[buf_n].kva)),
+                              DMA_BUFFER_SIZE, vma->vm_page_prot);
+//        ret = dma_mmap_coherent(&s->dev->dev, vma, s->dma_rx_bufs[buf_n].kva, s->dma_rx_bufs[buf_n].hwa,
+//                DMA_BUFFER_SIZE);
+        if (ret)
+            return ret;
+    } else if (off == 2 * DMA_BUFFER_MAP_SIZE) { // BAR 0
         if (vma->vm_end - vma->vm_start != PCI_FPGA_BAR0_SIZE)
             return -EINVAL;
-        pfn = s->bar0_phys_addr >> PAGE_SHIFT;
-        /* not cached */
-        vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
         vma->vm_flags |= VM_IO;
-        if (io_remap_pfn_range(vma, vma->vm_start, pfn,
+        if (io_remap_pfn_range(vma, vma->vm_start, s->bar0_phys_addr >> PAGE_SHIFT,
                                vma->vm_end - vma->vm_start,
                                vma->vm_page_prot)) {
             pr_err("io_remap_pfn_range failed\n");
@@ -216,8 +214,7 @@ static int litepcie_dma_start(LitePCIeState *s, struct litepcie_ioctl_dma_start 
         litepcie_writel(s, CSR_PCIE_DMA_WRITER_TABLE_LOOP_PROG_N_ADDR, 0);
         for(i = 0; i < m->rx_buf_count; i++) {
             litepcie_writel(s, CSR_PCIE_DMA_WRITER_TABLE_VALUE_ADDR, m->rx_buf_size);
-            litepcie_writel(s, CSR_PCIE_DMA_WRITER_TABLE_VALUE_ADDR + 4,
-                       s->dma_rx_bufs_addr[i]);
+            litepcie_writel(s, CSR_PCIE_DMA_WRITER_TABLE_VALUE_ADDR + 4, s->dma_rx_bufs[i].hwa);
             litepcie_writel(s, CSR_PCIE_DMA_WRITER_TABLE_WE_ADDR, 1);
         }
         litepcie_writel(s, CSR_PCIE_DMA_WRITER_TABLE_LOOP_PROG_N_ADDR, 1);
@@ -230,8 +227,7 @@ static int litepcie_dma_start(LitePCIeState *s, struct litepcie_ioctl_dma_start 
         litepcie_writel(s, CSR_PCIE_DMA_READER_TABLE_LOOP_PROG_N_ADDR, 0);
         for(i = 0; i < m->tx_buf_count; i++) {
             litepcie_writel(s, CSR_PCIE_DMA_READER_TABLE_VALUE_ADDR, m->tx_buf_size);
-            litepcie_writel(s, CSR_PCIE_DMA_READER_TABLE_VALUE_ADDR + 4,
-                       s->dma_tx_bufs_addr[i]);
+            litepcie_writel(s, CSR_PCIE_DMA_READER_TABLE_VALUE_ADDR + 4, s->dma_tx_bufs[i].hwa);
             litepcie_writel(s, CSR_PCIE_DMA_READER_TABLE_WE_ADDR, 1);
         }
         litepcie_writel(s, CSR_PCIE_DMA_READER_TABLE_LOOP_PROG_N_ADDR, 1);
@@ -504,34 +500,20 @@ static int litepcie_pci_probe(struct pci_dev *dev, const struct pci_device_id *i
         goto fail4;
     }
 
-    /* allocate DMA buffers */
-    for(i = 0; i < PCIE_DMA_BUFFER_COUNT; i++) {
-        s->dma_tx_bufs[i] = kzalloc(DMA_BUFFER_SIZE, GFP_KERNEL | GFP_DMA32);
-        if (!s->dma_tx_bufs[i]) {
-            goto fail6;
-        }
-        s->dma_tx_bufs_addr[i] = pci_map_single(dev, s->dma_tx_bufs[i],
-                                                DMA_BUFFER_SIZE,
-                                                DMA_TO_DEVICE);
-        if (!s->dma_tx_bufs_addr[i]) {
-            ret = -ENOMEM;
-            goto fail6;
-        }
-    }
+//    /* allocate DMA buffers */
+//    dma_pool = dmam_pool_create(LITEPCIE_NAME, &dev->dev, DMA_BUFFER_SIZE, 0, 0);
+//    if (!dma_pool)
+//        goto fail6;
 
     for(i = 0; i < PCIE_DMA_BUFFER_COUNT; i++) {
-        s->dma_rx_bufs[i] = kzalloc(DMA_BUFFER_SIZE, GFP_KERNEL | GFP_DMA32);
-        if (!s->dma_rx_bufs[i]) {
+//        s->dma_tx_bufs[i].kva = dma_pool_zalloc(dma_pool, GFP_KERNEL, &s->dma_tx_bufs[i].hwa);
+        s->dma_tx_bufs[i].kva = dmam_alloc_coherent(&dev->dev, DMA_BUFFER_SIZE, &s->dma_tx_bufs[i].hwa, GFP_KERNEL);
+        if (!s->dma_tx_bufs[i].kva)
             goto fail6;
-        }
-
-        s->dma_rx_bufs_addr[i] = pci_map_single(dev, s->dma_rx_bufs[i],
-                                                DMA_BUFFER_SIZE,
-                                                DMA_FROM_DEVICE);
-        if (!s->dma_rx_bufs_addr[i]) {
-            ret = -ENOMEM;
+//        s->dma_rx_bufs[i].kva = dma_pool_zalloc(dma_pool, GFP_KERNEL, &s->dma_rx_bufs[i].hwa);
+        s->dma_rx_bufs[i].kva = dmam_alloc_coherent(&dev->dev, DMA_BUFFER_SIZE, &s->dma_rx_bufs[i].hwa, GFP_KERNEL);
+        if (!s->dma_rx_bufs[i].kva)
             goto fail6;
-        }
     }
 
     init_waitqueue_head(&s->dma_waitqueue);
@@ -558,23 +540,12 @@ static int litepcie_pci_probe(struct pci_dev *dev, const struct pci_device_id *i
 
 static void litepcie_end(struct pci_dev *dev, LitePCIeState *s)
 {
-    int i;
+//     int i;
 
-    for(i = 0; i < PCIE_DMA_BUFFER_COUNT; i++) {
-        if (s->dma_tx_bufs_addr[i]) {
-            dma_unmap_single(&dev->dev, s->dma_tx_bufs_addr[i],
-                             DMA_BUFFER_SIZE, DMA_TO_DEVICE);
-        }
-        kfree(s->dma_tx_bufs[i]);
-    }
-
-    for(i = 0; i < PCIE_DMA_BUFFER_COUNT; i++) {
-        if (s->dma_rx_bufs_addr[i]) {
-            dma_unmap_single(&dev->dev, s->dma_rx_bufs_addr[i],
-                             DMA_BUFFER_SIZE, DMA_FROM_DEVICE);
-        }
-        kfree(s->dma_rx_bufs[i]);
-    }
+//     for(i = 0; i < PCIE_DMA_BUFFER_COUNT; i++) {
+//         dma_pool_free(dma_pool, s->dma_tx_bufs[i].kva, s->dma_tx_bufs[i].hwa);
+//         dma_pool_free(dma_pool, s->dma_rx_bufs[i].kva, s->dma_rx_bufs[i].hwa);
+//     }
 }
 
 static void litepcie_pci_remove(struct pci_dev *dev)

@@ -18,7 +18,6 @@
 
 #include "litepcie.h"
 #include "cutils.h"
-#include "config.h"
 #include "csr.h"
 #include "flags.h"
 
@@ -86,22 +85,22 @@ LitePCIeState *litepcie_open(const char *device_name)
         exit(1);
     }
 
-    s->dma_tx_buf = mmap(NULL, s->mmap_info.dma_tx_buf_size *
-                         s->mmap_info.dma_tx_buf_count,
-                         PROT_READ | PROT_WRITE, MAP_SHARED, s->litepcie_fd,
-                         s->mmap_info.dma_tx_buf_offset);
-    if (s->dma_tx_buf == MAP_FAILED) {
-        perror("mmap1");
-        exit(1);
-    }
+    for (int i = 0; i < PCIE_DMA_BUFFER_COUNT; i ++) {
+        s->dma_tx_buf[i] = mmap(NULL, s->mmap_info.dma_tx_buf_size,
+                             PROT_READ | PROT_WRITE, MAP_SHARED, s->litepcie_fd,
+                             s->mmap_info.dma_tx_buf_offset + i * s->mmap_info.dma_tx_buf_size);
+        if (s->dma_tx_buf[i] == MAP_FAILED) {
+            perror("mmap1");
+            exit(1);
+        }
 
-    s->dma_rx_buf = mmap(NULL, s->mmap_info.dma_rx_buf_size *
-                         s->mmap_info.dma_rx_buf_count,
-                         PROT_READ | PROT_WRITE, MAP_SHARED, s->litepcie_fd,
-                         s->mmap_info.dma_rx_buf_offset);
-    if (s->dma_rx_buf == MAP_FAILED) {
-        perror("mmap2");
-        exit(1);
+        s->dma_rx_buf[i] = mmap(NULL, s->mmap_info.dma_rx_buf_size,
+                             PROT_READ | PROT_WRITE, MAP_SHARED, s->litepcie_fd,
+                             s->mmap_info.dma_rx_buf_offset + i * s->mmap_info.dma_rx_buf_size);
+        if (s->dma_rx_buf[i] == MAP_FAILED) {
+            perror("mmap2");
+            exit(1);
+        }
     }
 
     /* map the registers */
@@ -169,13 +168,13 @@ void litepcie_close(LitePCIeState *s)
 {
     pthread_mutex_destroy(&s->fifo_mutex);
 
-    if (s->dma_tx_buf) {
-        munmap(s->dma_tx_buf, s->mmap_info.dma_tx_buf_size *
-               s->mmap_info.dma_tx_buf_count);
-    }
-    if (s->dma_rx_buf) {
-        munmap(s->dma_rx_buf, s->mmap_info.dma_rx_buf_size *
-               s->mmap_info.dma_rx_buf_count);
+    for (int i = 0; i < PCIE_DMA_BUFFER_COUNT; i ++) {
+        if (s->dma_tx_buf[i]) {
+            munmap(s->dma_tx_buf[i], s->mmap_info.dma_tx_buf_size);
+        }
+        if (s->dma_rx_buf[i]) {
+            munmap(s->dma_rx_buf[i], s->mmap_info.dma_rx_buf_size);
+        }
     }
     if (s->reg_buf)
         munmap(s->reg_buf, s->mmap_info.reg_size);
