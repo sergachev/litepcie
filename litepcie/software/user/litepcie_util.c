@@ -129,7 +129,7 @@ void dma_test(LitePCIeState *s, int buf_size, int buf_count, BOOL is_loopback)
                 tx_underflows++;
             }
 
-            write_pn_data((uint32_t *)(s->dma_tx_buf[buf_num_cur]),
+            write_pn_data((uint32_t *)(s->dma_tx_buf[tx_buf_num]),
                           s->tx_buf_size >> 2, &tx_seed);
 
             if (buf_rx_count >= 4*buf_count/10) {
