@@ -30,6 +30,7 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
 #include <linux/sched/signal.h>
 #endif
+#include <asm/set_memory.h>
 
 
 #include "litepcie.h"
@@ -133,6 +134,7 @@ static int litepcie_mmap(struct file *file, struct vm_area_struct *vma)
             buf_n -= PCIE_DMA_BUFFER_COUNT;
         }
         vma->vm_pgoff = 0;
+        set_memory_uc((unsigned long) b[buf_n].kva, PFN_DOWN(DMA_BUFFER_SIZE));
         ret = dma_mmap_coherent(&s->dev->dev, vma, b[buf_n].kva, b[buf_n].hwa, DMA_BUFFER_SIZE);
         vma->vm_pgoff = PFN_DOWN(vm_off);
         if (ret)
