@@ -116,34 +116,32 @@ static int litepcie_open(struct inode *inode, struct file *file)
 static int litepcie_mmap(struct file *file, struct vm_area_struct *vma)
 {
     LitePCIeState *s = file->private_data;
-    unsigned long off = vma->vm_pgoff << PAGE_SHIFT;
-    unsigned int buf_n = (off / DMA_BUFFER_SIZE) % PCIE_DMA_BUFFER_COUNT;
+    unsigned long vm_off = vma->vm_pgoff << PAGE_SHIFT;
+    unsigned int buf_n = vm_off / DMA_BUFFER_SIZE;
+    struct litepcie_buf *b;
     int ret;
 
     vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-    if (off < DMA_BUFFER_MAP_SIZE) { // TX
+    if (vm_off < 2 * DMA_BUFFER_MAP_SIZE) {  // TX or RX buffers
         if (vma->vm_end - vma->vm_start != DMA_BUFFER_SIZE)
             return -EINVAL;
-        ret = remap_pfn_range(vma, vma->vm_start, PFN_DOWN(virt_to_phys(s->dma_tx_bufs[buf_n].kva)),
-                              DMA_BUFFER_SIZE, vma->vm_page_prot);
-//        ret = dma_mmap_coherent(&s->dev->dev, vma, s->dma_tx_bufs[buf_n].kva, s->dma_tx_bufs[buf_n].hwa,
-//                DMA_BUFFER_SIZE);
+        if (buf_n < PCIE_DMA_BUFFER_COUNT)
+        {
+            b = s->dma_tx_bufs;
+        } else {
+            b = s->dma_rx_bufs;
+            buf_n -= PCIE_DMA_BUFFER_COUNT;
+        }
+        vma->vm_pgoff = 0;
+        ret = dma_mmap_coherent(&s->dev->dev, vma, b[buf_n].kva, b[buf_n].hwa, DMA_BUFFER_SIZE);
+        vma->vm_pgoff = PFN_DOWN(vm_off);
         if (ret)
             return ret;
-    } else if (off < 2 * DMA_BUFFER_MAP_SIZE) { // RX
-        if (vma->vm_end - vma->vm_start != DMA_BUFFER_SIZE)
-            return -EINVAL;
-        ret = remap_pfn_range(vma, vma->vm_start, PFN_DOWN(virt_to_phys(s->dma_rx_bufs[buf_n].kva)),
-                              DMA_BUFFER_SIZE, vma->vm_page_prot);
-//        ret = dma_mmap_coherent(&s->dev->dev, vma, s->dma_rx_bufs[buf_n].kva, s->dma_rx_bufs[buf_n].hwa,
-//                DMA_BUFFER_SIZE);
-        if (ret)
-            return ret;
-    } else if (off == 2 * DMA_BUFFER_MAP_SIZE) { // BAR 0
+    } else if (vm_off == 2 * DMA_BUFFER_MAP_SIZE) { // BAR 0
         if (vma->vm_end - vma->vm_start != PCI_FPGA_BAR0_SIZE)
             return -EINVAL;
         vma->vm_flags |= VM_IO;
-        if (io_remap_pfn_range(vma, vma->vm_start, s->bar0_phys_addr >> PAGE_SHIFT,
+        if (io_remap_pfn_range(vma, vma->vm_start, PFN_DOWN(s->bar0_phys_addr),
                                vma->vm_end - vma->vm_start,
                                vma->vm_page_prot)) {
             pr_err("io_remap_pfn_range failed\n");
